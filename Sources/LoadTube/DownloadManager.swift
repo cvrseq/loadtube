@@ -15,6 +15,7 @@ final class DownloadManager: ObservableObject {
 
     private let ytDlp: String
     private let ffmpegPath: String
+    private let tidalBackend: TidalBackend
     private let maxConcurrent = 2
     private var running: Set<UUID> = []
 
@@ -23,18 +24,21 @@ final class DownloadManager: ObservableObject {
     init(ytDlp: String, ffmpegPath: String) {
         self.ytDlp = ytDlp
         self.ffmpegPath = ffmpegPath
+        self.tidalBackend = TidalBackend(ffmpegPath: ffmpegPath)
     }
 
     // MARK: - Публичный интерфейс
 
     func add(url: String, preset: QualityPreset, allowPlaylist: Bool, folder: URL) {
-        let spotify = MusicResolver.isSpotifyLink(url)
+        let source = MediaSource.detect(url)
+        let spotify = source == .spotify
         let task = DownloadTask(
             url: url,
             preset: preset,
-            allowPlaylist: allowPlaylist && !spotify,
+            allowPlaylist: allowPlaylist && (source == .youtube || source.isShortVideo),
             folder: folder,
-            isSpotify: spotify
+            isSpotify: spotify,
+            source: source
         )
         tasks.insert(task, at: 0)
         schedule()
@@ -47,11 +51,14 @@ final class DownloadManager: ObservableObject {
     }
 
     func cancel(_ task: DownloadTask) {
-        task.cancelled = true
-        task.process?.terminate()
+        task.cancel()
         if case .queued = task.state {
             task.state = .cancelled
         }
+    }
+
+    func cancelChild(_ parent: DownloadTask, child: DownloadTask) {
+        child.cancel()
     }
 
     func clearFinished() {
@@ -81,11 +88,25 @@ final class DownloadManager: ObservableObject {
             schedule()
         }
 
+        if task.source == .tidal {
+            await runTidal(task)
+            return
+        }
+
+        await runYTDLP(task)
+    }
+
+    private func runYTDLP(_ task: DownloadTask) async {
         task.state = .preparing
         task.progress = 0
         task.speed = ""
         task.eta = ""
         task.detail = l10n.t("detail.fetching")
+
+        let cookies = cookieSetup(for: task.source)
+        if let warning = cookies.warning {
+            task.warning = warning
+        }
 
         // 1. Метаданные
         if task.isSpotify {
@@ -115,7 +136,7 @@ final class DownloadManager: ObservableObject {
             }
         } else {
             do {
-                let meta = try await fetchMetadata(task)
+                let meta = try await fetchMetadata(task, cookies: cookies.arguments)
                 guard !task.cancelled else {
                     finishCancelled(task)
                     return
@@ -142,12 +163,415 @@ final class DownloadManager: ObservableObject {
         }
 
         // 2. Загрузка
-        await download(task)
+        await download(task, cookies: cookies.arguments)
+    }
+
+    // MARK: - Cookies для Instagram и TikTok
+
+    private struct CookieSetup {
+        let arguments: [String]
+        let warning: String?
+    }
+
+    /// Safari на современных macOS защищён TCC, поэтому при отсутствии доступа
+    /// пробуем другой установленный браузер, а если их нет — качаем без cookies.
+    private func cookieSetup(for source: MediaSource) -> CookieSetup {
+        guard source.isShortVideo else { return CookieSetup(arguments: [], warning: nil) }
+
+        let raw = UserDefaults.standard.string(forKey: "cookieBrowser")
+            ?? CookieBrowser.safari.rawValue
+        guard let browser = CookieBrowser(rawValue: raw), browser != .none else {
+            return CookieSetup(arguments: [], warning: nil)
+        }
+
+        if browser.isAvailable, let name = browser.ytDlpName {
+            return CookieSetup(arguments: ["--cookies-from-browser", name], warning: nil)
+        }
+
+        if let fallback = CookieBrowser.allCases.first(where: {
+            $0 != .none && $0 != browser && $0.isAvailable
+        }), let name = fallback.ytDlpName {
+            return CookieSetup(
+                arguments: ["--cookies-from-browser", name],
+                warning: l10n.f(
+                    "cookies.warningFallback",
+                    l10n.t(browser.titleKey),
+                    l10n.t(fallback.titleKey)
+                )
+            )
+        }
+
+        return CookieSetup(arguments: [], warning: l10n.t("cookies.warningNone"))
+    }
+
+    /// Понятные сообщения для частых ошибок Instagram и TikTok.
+    private func friendlyMessage(_ message: String, source: MediaSource) -> String {
+        let lower = message.lowercased()
+
+        if lower.contains("failed to decrypt") || lower.contains("keyring")
+            || lower.contains("keychain") || lower.contains("operation not permitted")
+            || lower.contains("permission denied") {
+            return l10n.t("error.cookies")
+        }
+        if source == .instagram,
+           lower.contains("login") || lower.contains("empty media response")
+            || lower.contains("rate limit") || lower.contains("rate-limit")
+            || lower.contains("checkpoint") {
+            return l10n.t("error.instagramLogin")
+        }
+        if source == .tiktok, lower.contains("login") || lower.contains("log in") {
+            return l10n.t("error.tiktokLogin")
+        }
+        if source.isShortVideo,
+           lower.contains("requested format is not available")
+            || lower.contains("no video formats found") {
+            return l10n.t("error.shortVideoFormat")
+        }
+        return message
+    }
+
+    // MARK: - Tidal
+
+    private func runTidal(_ task: DownloadTask) async {
+        task.state = .preparing
+        task.progress = 0
+        task.speed = ""
+        task.eta = ""
+        task.detail = l10n.t("tidal.detail.resolving")
+
+        do {
+            let resolved = try await TidalService.shared.lookup(task.url)
+            guard !task.cancelled else {
+                finishCancelled(task)
+                return
+            }
+
+            let preview = resolved.preview
+            task.title = preview.title
+            task.thumbnailURL = preview.artwork
+
+            switch resolved {
+            case .track(let track):
+                task.tidalTrack = track
+                task.tidalAlbum = track.album
+                task.tidalIsSingle = true
+                task.tidalTotalTracks = 1
+                task.isPlaylist = false
+                await downloadTidalSingle(task)
+            case .video(let video):
+                task.tidalVideo = video
+                task.tidalAlbum = video.album
+                task.tidalIsSingle = true
+                task.isPlaylist = false
+                await downloadTidalSingle(task)
+            default:
+                task.isCollection = true
+                task.isTidalCollectionPreparing = true
+                task.detail = l10n.t("tidal.detail.collecting")
+                let collection = try await TidalService.shared.collection(for: resolved)
+                guard !task.cancelled else {
+                    finishCancelled(task)
+                    return
+                }
+                try prepareTidalChildren(task, collection: collection, resolved: resolved)
+                await runTidalCollection(task)
+            }
+        } catch {
+            guard !task.cancelled else {
+                finishCancelled(task)
+                return
+            }
+            if case TidalError.sessionExpired = error {
+                TidalService.shared.markSessionExpired()
+            }
+            task.state = .failed(TidalService.shared.message(for: error))
+            task.speed = ""
+            task.eta = ""
+            task.isTidalCollectionPreparing = false
+        }
+    }
+
+    private func prepareTidalChildren(
+        _ parent: DownloadTask,
+        collection: TidalCollection,
+        resolved: TidalResolved
+    ) throws {
+        var items = collection.items
+        if !TidalPreferences.downloadVideos {
+            items.removeAll { item in
+                if case .video = item.media { return true }
+                return false
+            }
+        }
+        guard !items.isEmpty else { throw TidalError.noTracks }
+
+        let mixTitle: String?
+        if case .mix = resolved {
+            mixTitle = collection.title
+        } else {
+            mixTitle = nil
+        }
+
+        var children: [DownloadTask] = []
+        for (index, item) in items.enumerated() {
+            let child = DownloadTask(
+                url: parent.url,
+                preset: parent.preset,
+                allowPlaylist: false,
+                folder: parent.folder,
+                source: .tidal
+            )
+            child.tidalAlbum = item.album
+            child.tidalPlaylist = item.playlist
+            child.tidalMixTitle = mixTitle
+            child.tidalIsSingle = false
+            child.thumbnailURL = TidalConfig.coverURL(
+                item.album?.cover,
+                width: 320,
+                height: 320
+            )
+            child.state = .queued
+
+            switch item.media {
+            case .track(let track):
+                child.tidalTrack = track
+                child.title = track.displayTitle
+                child.tidalPosition = mixTitle == nil
+                    ? playlistPosition(for: track, index: index, playlist: item.playlist)
+                    : (index + 1)
+                child.tidalTotalTracks = collectionTotal(
+                    for: item.album,
+                    resolved: resolved,
+                    fallback: items.count
+                )
+            case .video(let video):
+                child.tidalVideo = video
+                child.title = video.displayTitle
+                child.tidalPosition = index + 1
+                child.tidalTotalTracks = collectionTotal(
+                    for: item.album,
+                    resolved: resolved,
+                    fallback: items.count
+                )
+            }
+            children.append(child)
+        }
+
+        parent.children = children
+        parent.totalCount = children.count
+        parent.completedCount = 0
+        parent.failedCount = 0
+        parent.isTidalCollectionPreparing = false
+    }
+
+    private func playlistPosition(for track: TidalTrack, index: Int, playlist: TidalPlaylist?) -> Int {
+        if playlist != nil {
+            return track.trackNumberOnPlaylist ?? (index + 1)
+        }
+        return track.trackNumber ?? (index + 1)
+    }
+
+    private func collectionTotal(
+        for album: TidalAlbum?,
+        resolved: TidalResolved,
+        fallback: Int
+    ) -> Int {
+        switch resolved {
+        case .album, .artist:
+            return album?.numberOfTracks ?? fallback
+        case .playlist, .mix, .track, .video:
+            return fallback
+        }
+    }
+
+    private enum ChildOutcome {
+        case finished
+        case failed
+        case cancelled
+    }
+
+    private func runTidalCollection(_ parent: DownloadTask) async {
+        parent.state = .downloading
+        parent.progress = 0
+        parent.detail = l10n.f("tidal.detail.progress", 0, parent.totalCount)
+
+        outer: for (index, child) in parent.children.enumerated() {
+            if parent.cancelled {
+                break outer
+            }
+            let outcome = await downloadTidalChild(child, parent: parent)
+            switch outcome {
+            case .finished:
+                parent.completedCount += 1
+            case .failed:
+                parent.failedCount += 1
+            case .cancelled:
+                if parent.cancelled {
+                    break outer
+                }
+                // Отменили только один трек — продолжаем остальные.
+                parent.failedCount += 1
+            }
+            if parent.cancelled {
+                break outer
+            }
+            if !TidalService.shared.isSignedIn {
+                parent.speed = ""
+                parent.eta = ""
+                parent.state = .failed(l10n.t("error.tidalSession"))
+                parent.detail = ""
+                return
+            }
+
+            let attempted = parent.completedCount + parent.failedCount
+            parent.progress = parent.totalCount > 0
+                ? Double(attempted) / Double(parent.totalCount)
+                : 0
+            parent.detail = l10n.f("tidal.detail.progress", attempted, parent.totalCount)
+
+            // Даём SwiftUI время обновить строку между треками.
+            if index < parent.children.count - 1 {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+
+        parent.speed = ""
+        parent.eta = ""
+        parent.outputURL = parent.folder
+
+        if parent.cancelled {
+            parent.state = .cancelled
+            parent.detail = ""
+            return
+        }
+
+        if parent.completedCount == 0 && parent.failedCount > 0 {
+            parent.state = .failed(l10n.t("tidal.error.allTracks"))
+            parent.detail = ""
+            return
+        }
+
+        if parent.failedCount > 0 {
+            parent.warning = l10n.f("tidal.warning.partial", parent.failedCount)
+        }
+        parent.progress = 1
+        parent.state = .finished
+        parent.detail = l10n.t("detail.finished")
+        Notifier.completed(title: parent.title)
+    }
+
+    private func downloadTidalChild(
+        _ child: DownloadTask,
+        parent: DownloadTask
+    ) async -> ChildOutcome {
+        guard !child.cancelled, !parent.cancelled else {
+            child.state = .cancelled
+            return .cancelled
+        }
+
+        child.state = .downloading
+        child.progress = 0
+        child.detail = l10n.t("tidal.detail.downloading")
+
+        do {
+            if let track = child.tidalTrack {
+                try await tidalBackend.downloadTrack(
+                    track,
+                    album: child.tidalAlbum ?? track.album,
+                    playlist: child.tidalPlaylist,
+                    mixTitle: child.tidalMixTitle,
+                    isSingle: false,
+                    position: child.tidalPosition,
+                    totalTracks: child.tidalTotalTracks,
+                    root: child.folder,
+                    task: child
+                )
+            } else if let video = child.tidalVideo {
+                try await tidalBackend.downloadVideo(
+                    video,
+                    album: child.tidalAlbum ?? video.album,
+                    playlist: child.tidalPlaylist,
+                    mixTitle: child.tidalMixTitle,
+                    isSingle: false,
+                    position: child.tidalPosition,
+                    root: child.folder,
+                    task: child
+                )
+            } else {
+                throw TidalError.unavailable
+            }
+
+            child.state = .finished
+            if child.wasSkipped {
+                child.detail = l10n.t("tidal.detail.alreadyExists")
+            }
+            return .finished
+        } catch TidalError.cancelled {
+            child.state = .cancelled
+            return .cancelled
+        } catch {
+            if parent.cancelled {
+                child.state = .cancelled
+                return .cancelled
+            }
+            if case TidalError.sessionExpired = error {
+                TidalService.shared.markSessionExpired()
+            }
+            child.state = .failed(TidalService.shared.message(for: error))
+            return .failed
+        }
+    }
+
+    private func downloadTidalSingle(_ task: DownloadTask) async {
+        task.state = .downloading
+        task.progress = 0
+        task.detail = l10n.t("tidal.detail.downloading")
+        do {
+            if let track = task.tidalTrack {
+                try await tidalBackend.downloadTrack(
+                    track,
+                    album: task.tidalAlbum ?? track.album,
+                    playlist: nil,
+                    mixTitle: nil,
+                    isSingle: true,
+                    position: track.trackNumber,
+                    totalTracks: track.album?.numberOfTracks ?? 1,
+                    root: task.folder,
+                    task: task
+                )
+            } else if let video = task.tidalVideo {
+                try await tidalBackend.downloadVideo(
+                    video,
+                    album: task.tidalAlbum ?? video.album,
+                    playlist: nil,
+                    mixTitle: nil,
+                    isSingle: true,
+                    position: video.trackNumber,
+                    root: task.folder,
+                    task: task
+                )
+            } else {
+                throw TidalError.unavailable
+            }
+            task.state = .finished
+            task.progress = 1
+            task.detail = l10n.t("detail.finished")
+            Notifier.completed(title: task.title)
+        } catch TidalError.cancelled {
+            task.state = .cancelled
+            task.detail = ""
+        } catch {
+            if case TidalError.sessionExpired = error {
+                TidalService.shared.markSessionExpired()
+            }
+            task.state = .failed(TidalService.shared.message(for: error))
+            task.speed = ""
+            task.eta = ""
+        }
     }
 
     private func finishCancelled(_ task: DownloadTask) {
-        task.process?.terminate()
-        task.process = nil
+        task.cancel()
         Self.cleanupPartials(task)
         task.state = .cancelled
         task.detail = ""
@@ -157,11 +581,12 @@ final class DownloadManager: ObservableObject {
 
     // MARK: - Метаданные
 
-    private func fetchMetadata(_ task: DownloadTask) async throws -> VideoMeta {
+    private func fetchMetadata(_ task: DownloadTask, cookies: [String]) async throws -> VideoMeta {
         var args = ["-J", "--flat-playlist", "--no-warnings", "--ignore-config"]
         if !task.allowPlaylist {
             args.append("--no-playlist")
         }
+        args += cookies
         args.append(task.url)
 
         let result = await ProcessRunner.run(
@@ -171,7 +596,9 @@ final class DownloadManager: ObservableObject {
         )
 
         guard result.code == 0 else {
-            throw LTError.message(Self.cleanError(result.lines))
+            throw LTError.message(
+                friendlyMessage(Self.cleanError(result.lines), source: task.source)
+            )
         }
 
         let json = result.lines.joined(separator: "\n")
@@ -201,7 +628,7 @@ final class DownloadManager: ObservableObject {
 
     // MARK: - Загрузка
 
-    private func download(_ task: DownloadTask) async {
+    private func download(_ task: DownloadTask, cookies: [String]) async {
         task.state = .downloading
         task.progress = 0
         task.lastError = nil
@@ -238,7 +665,11 @@ final class DownloadManager: ObservableObject {
             "--print-to-file", "after_move:%(filepath)s", printFile.path,
             "-o", template
         ]
-        args += effectivePreset.arguments
+        args += cookies
+        args += effectivePreset.arguments(for: task.source)
+        if task.source.isShortVideo {
+            args += ["--merge-output-format", "mp4"]
+        }
         if task.isSpotify {
             args.append("--no-playlist")
         } else {
@@ -295,7 +726,7 @@ final class DownloadManager: ObservableObject {
             let message = task.lastError
                 ?? l10n.f("error.exit", process.terminationStatus)
             Self.cleanupPartials(task)
-            task.state = .failed(message)
+            task.state = .failed(friendlyMessage(message, source: task.source))
             task.speed = ""
             task.eta = ""
             try? FileManager.default.removeItem(at: printFile)
@@ -320,7 +751,7 @@ final class DownloadManager: ObservableObject {
         // Для пресета «4K MP4» проверяем кодек и при необходимости
         // перекодируем в HEVC, чтобы файл открывался в QuickTime.
         var finalURL = outputURL
-        if !task.isSpotify, task.preset == .mp4_4k, let input = outputURL {
+        if !task.isSpotify, !task.source.isShortVideo, task.preset == .mp4_4k, let input = outputURL {
             let info = await Self.probeVideo(input, ffmpegPath: ffmpegPath)
             if let info, !Self.isQuickTimeCodec(info.codec) {
                 let converted = await transcodeToHEVC(
@@ -360,6 +791,24 @@ final class DownloadManager: ObservableObject {
         // Подставляем обложку и теги из Spotify.
         if task.isSpotify, let url = finalURL {
             finalURL = await applySpotifyTags(task, file: url)
+        }
+
+        // Instagram и TikTok иногда отдают HEVC с тегом `hev1`, HE-AAC/Opus
+        // или лишние дорожки — QuickTime такие файлы не открывает. Приводим
+        // контейнер к совместимому виду (по возможности без перекодирования).
+        if task.source.isShortVideo, !task.isSpotify, task.preset != .mp3,
+           let url = finalURL {
+            finalURL = await normalizeForQuickTime(task, input: url)
+            if task.cancelled {
+                if let result = finalURL {
+                    try? FileManager.default.removeItem(at: result)
+                }
+                task.state = .cancelled
+                task.speed = ""
+                task.eta = ""
+                try? FileManager.default.removeItem(at: printFile)
+                return
+            }
         }
 
         task.outputURL = task.isPlaylist ? task.folder : finalURL
@@ -617,6 +1066,205 @@ final class DownloadManager: ObservableObject {
         } catch {
             try? fm.removeItem(at: tempURL)
             return nil
+        }
+    }
+
+    // MARK: - Совместимость с QuickTime
+
+    private struct StreamSummary {
+        var videoCodec: String?
+        var videoTag: String?
+        var videoPixFmt: String?
+        var videoHeight: Int = 0
+        var audioCodecs: [String] = []
+        var videoCount = 0
+        var audioCount = 0
+        var otherTracks = 0
+    }
+
+    private static func probeStreams(_ url: URL, ffmpegPath: String) async -> StreamSummary? {
+        let result = await ProcessRunner.run(
+            executable: ffprobePath(for: ffmpegPath),
+            arguments: [
+                "-v", "error",
+                "-show_entries", "stream=codec_name,codec_type,codec_tag_string,pix_fmt,height",
+                "-of", "compact=p=0:nk=0",
+                url.path
+            ],
+            environment: environment()
+        )
+        guard result.code == 0 else { return nil }
+
+        var summary = StreamSummary()
+        for line in result.lines where !line.isEmpty {
+            var fields: [String: String] = [:]
+            for pair in line.split(separator: "|") {
+                let parts = pair.split(
+                    separator: "=",
+                    maxSplits: 1,
+                    omittingEmptySubsequences: false
+                )
+                guard parts.count == 2 else { continue }
+                fields[String(parts[0])] = String(parts[1])
+            }
+
+            switch fields["codec_type"] {
+            case "video":
+                summary.videoCount += 1
+                if summary.videoCodec == nil {
+                    summary.videoCodec = fields["codec_name"]
+                    summary.videoTag = fields["codec_tag_string"]
+                    summary.videoPixFmt = fields["pix_fmt"]
+                    summary.videoHeight = Int(fields["height"] ?? "") ?? 0
+                }
+            case "audio":
+                summary.audioCount += 1
+                summary.audioCodecs.append(fields["codec_name"] ?? "")
+            default:
+                summary.otherTracks += 1
+            }
+        }
+        return summary
+    }
+
+    private static func isQuickTimeCompatibleVideo(_ codec: String, pixFmt: String) -> Bool {
+        let pix = pixFmt.lowercased()
+        let chromaOK = !pix.contains("444") && !pix.contains("422")
+        switch codec.lowercased() {
+        case "h264":
+            return chromaOK && !isTenBit(pix)
+        case "hevc":
+            return chromaOK
+        default:
+            return false
+        }
+    }
+
+    /// Приводит файл Instagram/TikTok к виду, который открывает QuickTime:
+    /// тег HEVC `hvc1`, AAC-звук, одна видео- и одна аудиодорожка.
+    /// Если файл уже совместим, ничего не делает.
+    private func normalizeForQuickTime(_ task: DownloadTask, input: URL) async -> URL {
+        guard let summary = await Self.probeStreams(input, ffmpegPath: ffmpegPath),
+              summary.videoCount == 1 else {
+            return input
+        }
+
+        let videoCodec = (summary.videoCodec ?? "").lowercased()
+        let videoTag = (summary.videoTag ?? "").lowercased()
+        let pixFmt = summary.videoPixFmt ?? ""
+        let audioCodec = (summary.audioCodecs.first ?? "").lowercased()
+
+        let videoOK = Self.isQuickTimeCompatibleVideo(videoCodec, pixFmt: pixFmt)
+        let tagOK = videoCodec != "hevc" || videoTag == "hvc1"
+        let audioOK = audioCodec.isEmpty || audioCodec == "aac" || audioCodec == "alac"
+        let extrasOK = summary.audioCount <= 1 && summary.otherTracks == 0
+
+        guard !(videoOK && tagOK && audioOK && extrasOK) else { return input }
+
+        task.state = .merging
+        task.detail = l10n.t("detail.compatibility")
+        task.progress = 0
+        task.speed = ""
+        task.eta = ""
+
+        let fm = FileManager.default
+        let base = input.deletingPathExtension()
+        let output = input.pathExtension.lowercased() == "mp4"
+            ? input
+            : base.appendingPathExtension("mp4")
+        let tempURL = base.appendingPathExtension("lt-qt.mp4")
+        try? fm.removeItem(at: tempURL)
+
+        let duration = await Self.mediaDuration(input, ffmpegPath: ffmpegPath)
+
+        var args: [String] = [
+            "-y", "-v", "error", "-nostdin",
+            "-progress", "pipe:1", "-nostats",
+            "-i", input.path,
+            "-map", "0:v:0", "-map", "0:a:0?"
+        ]
+
+        if videoOK {
+            args += ["-c:v", "copy"]
+        } else {
+            args += [
+                "-c:v", "hevc_videotoolbox",
+                "-b:v", Self.bitrate(forHeight: summary.videoHeight),
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1"
+            ]
+        }
+
+        if videoCodec == "hevc" {
+            args += ["-tag:v", "hvc1"]
+        }
+
+        if audioOK {
+            args += ["-c:a", "copy"]
+        } else {
+            args += ["-c:a", "aac", "-b:a", "192k"]
+        }
+
+        args += ["-movflags", "+faststart", tempURL.path]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpegPath)
+        process.arguments = args
+        process.environment = Self.environment()
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        task.process = process
+
+        do {
+            try process.run()
+        } catch {
+            task.process = nil
+            try? fm.removeItem(at: tempURL)
+            return input
+        }
+
+        do {
+            for try await line in pipe.fileHandleForReading.bytes.lines {
+                guard line.hasPrefix("out_time_us="), duration > 0 else { continue }
+                guard let microseconds = Double(line.dropFirst("out_time_us=".count)),
+                      microseconds > 0 else { continue }
+                let ratio = min(max(microseconds / 1_000_000 / duration, 0), 1)
+                task.progress = ratio
+            }
+        } catch {
+            // Пайп закрылся — процесс завершился.
+        }
+
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        task.process = nil
+
+        if task.cancelled {
+            try? fm.removeItem(at: tempURL)
+            return input
+        }
+
+        guard process.terminationStatus == 0,
+              fm.fileExists(atPath: tempURL.path) else {
+            try? fm.removeItem(at: tempURL)
+            task.warning = l10n.t("warning.compatibility")
+            return input
+        }
+
+        do {
+            let isSameFile = output.standardizedFileURL == input.standardizedFileURL
+            if !isSameFile {
+                try? fm.removeItem(at: output)
+            }
+            try fm.removeItem(at: input)
+            try fm.moveItem(at: tempURL, to: output)
+            return output
+        } catch {
+            try? fm.removeItem(at: tempURL)
+            return input
         }
     }
 

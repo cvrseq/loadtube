@@ -5,6 +5,7 @@ import AppKit
 struct LoadTubeApp: App {
     @StateObject private var dependencies = DependencyManager()
     @StateObject private var localization = Localization.shared
+    @StateObject private var updates = UpdateManager()
     @AppStorage("theme") private var themeRaw = AppTheme.dark.rawValue
 
     var body: some Scene {
@@ -12,6 +13,7 @@ struct LoadTubeApp: App {
             RootView()
                 .environmentObject(dependencies)
                 .environmentObject(localization)
+                .environmentObject(updates)
                 .preferredColorScheme(AppTheme(rawValue: themeRaw)?.colorScheme)
                 .frame(minWidth: 700, minHeight: 640)
         }
@@ -19,6 +21,12 @@ struct LoadTubeApp: App {
         .defaultSize(width: 900, height: 680)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appInfo) {
+                Button(Localization.shared.t("update.checkMenu")) {
+                    Task { await updates.checkManually() }
+                }
+                .disabled(updates.isChecking)
+            }
         }
     }
 }
@@ -26,15 +34,24 @@ struct LoadTubeApp: App {
 struct RootView: View {
     @EnvironmentObject private var dependencies: DependencyManager
     @EnvironmentObject private var l10n: Localization
+    @EnvironmentObject private var updates: UpdateManager
+    @StateObject private var tidal = TidalService.shared
 
     var body: some View {
         ZStack {
             AppBackground()
             content
         }
+        .environmentObject(tidal)
+        .environmentObject(updates)
+        .sheet(isPresented: $updates.showPrompt) {
+            UpdateView()
+        }
         .task {
             dependencies.check()
             Notifier.requestAuthorization()
+            await tidal.bootstrap()
+            await updates.checkAutomatically()
         }
         .onAppear {
             NSApp.activate()

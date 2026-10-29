@@ -12,10 +12,21 @@ struct DownloadRow: View {
             thumbnail
 
             VStack(alignment: .leading, spacing: 7) {
-                Text(task.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(task.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    if task.isTidal {
+                        Text("TIDAL")
+                            .font(.system(size: 8, weight: .bold))
+                            .kerning(0.5)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color.primary.opacity(0.09)))
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 HStack(spacing: 4) {
                     statusIcon
@@ -24,6 +35,7 @@ struct DownloadRow: View {
                         .foregroundStyle(statusColor)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .help(statusText)
                 }
 
                 progressBar
@@ -87,7 +99,7 @@ struct DownloadRow: View {
     }
 
     private var showsAudioIcon: Bool {
-        task.isSpotify || task.preset == .mp3
+        task.isSpotify || task.preset == .mp3 || (task.isTidal && task.tidalVideo == nil)
     }
 
     @ViewBuilder
@@ -170,10 +182,12 @@ struct DownloadRow: View {
             parts.append("\(percent)%")
             if !task.speed.isEmpty { parts.append(task.speed) }
             if !task.eta.isEmpty { parts.append(l10n.f("row.eta", task.eta)) }
+            if let quality = task.actualQuality, !quality.isEmpty { parts.append(quality) }
             return parts.joined(separator: " · ")
         case .merging:
             return task.detail.isEmpty ? l10n.t("row.merging") : task.detail
         case .finished:
+            if task.wasSkipped { return l10n.t("tidal.detail.alreadyExists") }
             if let warning = task.warning { return warning }
             if task.isPlaylist { return l10n.t("row.playlistSaved") }
             return task.outputURL?.lastPathComponent ?? l10n.t("row.done")
