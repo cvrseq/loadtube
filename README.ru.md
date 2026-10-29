@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Resources/icon.png" alt="LoadTube icon" width="128">
+
 # LoadTube
 
 **Нативный загрузчик видео и музыки для macOS — без рекламы, без аккаунта в приложении, без браузера.**
@@ -233,6 +235,7 @@ loadtube/
 ├── README.md                         # английский README (основной)
 ├── README.ru.md                      # русский README
 ├── Resources/
+│   ├── icon.png                      # иконка приложения для README
 │   ├── Info.plist                    # метаданные приложения
 │   └── README-DMG.txt                # инструкция внутри DMG
 ├── Scripts/make_icon.swift           # генерация иконки 1024×1024
