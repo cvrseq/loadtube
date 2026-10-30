@@ -57,7 +57,7 @@ It is built for personal use on macOS 14+ and runs entirely on your Mac.
 | 🌗 | **Themes** | Dark, light or system appearance |
 | 🌍 | **Two languages** | Russian and English, switchable on the fly |
 | 📦 | **Zero setup** | On first launch the app downloads portable `yt-dlp` and `ffmpeg` (~120 MB) — no Homebrew required |
-| 🔄 | **Soft updates** | Once a day it checks GitHub Releases and offers a new version; nothing is installed without your consent |
+| 🔄 | **Soft updates** | Sparkle 2 checks once a day and offers a new version; nothing is installed without your consent |
 
 ## Supported sources
 
@@ -107,6 +107,7 @@ make app       # build build/LoadTube.app (universal: arm64 + x86_64)
 make run       # build and launch
 make install   # build and install into /Applications
 make dmg       # build dist/LoadTube.dmg for distribution
+make release   # build the DMG and regenerate appcast.xml for Sparkle
 make clean     # remove build artifacts
 ```
 
@@ -201,14 +202,23 @@ Playlist/01 - Artist - Track.flac
 
 ## Updates
 
-LoadTube checks for updates through GitHub Releases:
+LoadTube updates through [Sparkle 2](https://sparkle-project.org) and the appcast feed in this repository (`appcast.xml`); the builds themselves live in GitHub Releases:
 
 - automatically — at most once a day, without blocking the UI;
 - manually — gear icon → **Check for updates**, or the app menu **LoadTube → Check for Updates…**.
 
-If a newer version exists, an optional window with release notes appears. You can choose **Later**, **Skip this version** or **Download update**. The DMG is downloaded to `~/Downloads`, verified with `hdiutil` and opened; you then drag the app into Applications yourself.
+When a newer version exists, Sparkle shows a window with the release notes: **Install Update**, **Remind Me Later** or **Skip This Version**. On install it downloads the archive, verifies the EdDSA signature, replaces the app in place and offers to relaunch. Nothing is installed without the user’s consent; automatic checks can be disabled in Settings.
 
-Automatic checks can be disabled in Settings. The app never installs updates silently and never overwrites itself.
+Releasing a new version:
+
+```bash
+# 1. Bump CFBundleShortVersionString and CFBundleVersion in Resources/Info.plist
+make release   # builds release/LoadTube-<version>.dmg and updates appcast.xml
+# 2. Upload the DMG to a GitHub Release tagged v<version>
+# 3. Commit appcast.xml to the main branch
+```
+
+Updates are signed with a Sparkle EdDSA key (the private key lives in the Keychain; the public part is in `Resources/Info.plist` as `SUPublicEDKey`).
 
 ## Interface language
 
@@ -231,7 +241,8 @@ The interface defaults to Russian. In Settings (gear icon) you can pick **Russia
 ```text
 loadtube/
 ├── Package.swift                     # Swift Package (executable)
-├── Makefile                          # .app/DMG build, icon, install
+├── Makefile                          # .app/DMG build, icon, install, release
+├── appcast.xml                       # Sparkle 2 appcast feed
 ├── README.md                         # English README (main)
 ├── README.ru.md                      # Russian README
 ├── Resources/
@@ -259,9 +270,7 @@ loadtube/
     ├── TidalSearchView.swift         # Tidal search
     ├── TidalArtistSheet.swift        # artist album picker
     ├── DownloadGroupRow.swift        # album/playlist as one row
-    ├── UpdateManager.swift           # soft GitHub Releases updates
-    ├── UpdateView.swift              # update window
-    ├── UpdateFileDownloader.swift    # DMG download with progress
+    ├── UpdateManager.swift           # Sparkle 2 updates
     ├── DependencyManager.swift       # yt-dlp + ffmpeg lookup/install
     ├── ProcessRunner.swift           # child process runner
     ├── Notifier.swift                # notifications and sound

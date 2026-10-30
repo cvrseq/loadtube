@@ -23,9 +23,8 @@ struct LoadTubeApp: App {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
                 Button(Localization.shared.t("update.checkMenu")) {
-                    Task { await updates.checkManually() }
+                    updates.checkManually()
                 }
-                .disabled(updates.isChecking)
             }
         }
     }
@@ -34,7 +33,6 @@ struct LoadTubeApp: App {
 struct RootView: View {
     @EnvironmentObject private var dependencies: DependencyManager
     @EnvironmentObject private var l10n: Localization
-    @EnvironmentObject private var updates: UpdateManager
     @StateObject private var tidal = TidalService.shared
 
     var body: some View {
@@ -43,15 +41,10 @@ struct RootView: View {
             content
         }
         .environmentObject(tidal)
-        .environmentObject(updates)
-        .sheet(isPresented: $updates.showPrompt) {
-            UpdateView()
-        }
         .task {
             dependencies.check()
             Notifier.requestAuthorization()
             await tidal.bootstrap()
-            await updates.checkAutomatically()
         }
         .onAppear {
             NSApp.activate()

@@ -50,7 +50,8 @@ final class TidalService: ObservableObject {
     func startLogin() async throws -> TidalDeviceLogin {
         isSigningIn = true
         defer { isSigningIn = false }
-        return try await TidalAuth.shared.startDeviceLogin()
+        let preferred = UserDefaults.standard.object(forKey: "tidalClientIndex") as? Int ?? 1
+        return try await TidalAuth.shared.startDeviceLogin(preferredIndex: preferred)
     }
 
     func waitForLogin(_ login: TidalDeviceLogin) async throws -> TidalAccount {

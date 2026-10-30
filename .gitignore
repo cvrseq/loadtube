@@ -1,5 +1,6 @@
 .build/
 build/
 dist/
+release/
 .DS_Store
 *.xcuserstate

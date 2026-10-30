@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage("tidalDownloadVideos") private var tidalDownloadVideos = true
     @AppStorage("tidalSkipExisting") private var tidalSkipExisting = true
     @AppStorage("tidalIncludeEP") private var tidalIncludeEP = true
+    @AppStorage("tidalClientIndex") private var tidalClientIndex = 1
     @AppStorage("cookieBrowser") private var cookieBrowserRaw: String = CookieBrowser.safari.rawValue
     @State private var showLogin = false
     @State private var cookieStatus: String?
@@ -173,6 +174,27 @@ struct SettingsView: View {
                         }
                     }
 
+                    HStack(spacing: 10) {
+                        Text(l10n.t("tidal.client"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 112, alignment: .leading)
+                        Picker("", selection: $tidalClientIndex) {
+                            ForEach(Array(TidalConfig.credentials.indices), id: \.self) { index in
+                                Text(clientLabel(index)).tag(index)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 230)
+                        Spacer()
+                    }
+
+                    Text(l10n.t("tidal.client.hint"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     if tidal.isSignedIn {
                         HStack(spacing: 10) {
                             Text(l10n.t("tidal.quality"))
@@ -252,59 +274,21 @@ struct SettingsView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        if updates.isChecking {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.mini)
-                                Text(l10n.t("update.checking"))
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            Button(l10n.t("update.check")) {
-                                Task { await updates.checkManually(present: false) }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.ltAccent)
+                        Button(l10n.t("update.check")) {
+                            updates.checkManually()
                         }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.ltAccent)
                     }
 
                     Toggle(l10n.t("update.auto"), isOn: $autoUpdateCheck)
                         .toggleStyle(.checkbox)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
-
-                    if let info = updates.available {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color.ltAccent)
-                            Text(l10n.f("update.availableStatus", info.version))
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button(l10n.t("update.open")) {
-                                dismiss()
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                    updates.presentPrompt()
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.ltAccent)
+                        .onChange(of: autoUpdateCheck) { _, enabled in
+                            updates.setAutoCheck(enabled)
                         }
-                        .padding(8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.ltAccent.opacity(0.07))
-                        )
-                    }
-
-                    if let status = updates.manualStatus, !updates.isChecking {
-                        Text(status)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.tertiary)
-                    }
 
                     Text(l10n.t("settings.aboutHint"))
                         .font(.system(size: 10.5))
@@ -329,6 +313,16 @@ struct SettingsView: View {
             return displayPath(url) + " (" + l10n.t("settings.folderDefault") + ")"
         }
         return displayPath(URL(fileURLWithPath: folderPath))
+    }
+
+    private func clientLabel(_ index: Int) -> String {
+        switch index {
+        case 0: return l10n.t("tidal.client.firetv")
+        case 1: return l10n.t("tidal.client.androidAuto")
+        case 2: return l10n.t("tidal.client.tv")
+        case 3: return l10n.t("tidal.client.androidTv")
+        default: return "Tidal"
+        }
     }
 
     private func displayPath(_ url: URL) -> String {

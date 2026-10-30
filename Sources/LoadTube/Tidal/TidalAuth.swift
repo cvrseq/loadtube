@@ -33,6 +33,14 @@ actor TidalAuth {
         loadIfNeeded()
         guard let value = session else { throw TidalError.notSignedIn }
         if !forceRefresh && !value.isExpired {
+            if value.sessionId == nil {
+                let enriched = await enrich(value)
+                if enriched.sessionId != nil {
+                    session = enriched
+                    save(enriched)
+                }
+                return enriched
+            }
             return value
         }
         return try await refresh(value)
@@ -56,10 +64,17 @@ actor TidalAuth {
 
     // MARK: - Device login
 
-    func startDeviceLogin() async throws -> TidalDeviceLogin {
+    func startDeviceLogin(preferredIndex: Int? = nil) async throws -> TidalDeviceLogin {
         var lastError: Error = TidalError.sessionExpired
 
-        for (index, credential) in TidalConfig.credentials.enumerated() {
+        var order = Array(TidalConfig.credentials.indices)
+        if let preferredIndex, order.contains(preferredIndex) {
+            order.removeAll { $0 == preferredIndex }
+            order.insert(preferredIndex, at: 0)
+        }
+
+        for index in order {
+            let credential = TidalConfig.credentials[index]
             do {
                 let response: DeviceAuthorizationResponse = try await postForm(
                     path: "device_authorization",
@@ -299,7 +314,9 @@ actor TidalAuth {
     /// Иногда token endpoint не отдаёт countryCode/userId. Дозапрашиваем
     /// /sessions, чтобы регион и аккаунт были корректными.
     private func enrich(_ value: TidalSession) async -> TidalSession {
-        guard value.countryCode.isEmpty || value.userId == 0 else { return value }
+        guard value.countryCode.isEmpty || value.userId == 0 || value.sessionId == nil else {
+            return value
+        }
         guard let url = URL(string: "https://api.tidal.com/v1/sessions") else { return value }
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
@@ -315,6 +332,7 @@ actor TidalAuth {
         var result = value
         if let userId = info.userId, userId > 0 { result.userId = userId }
         if let country = info.countryCode, !country.isEmpty { result.countryCode = country }
+        if let sessionId = info.sessionId, !sessionId.isEmpty { result.sessionId = sessionId }
         return result
     }
 

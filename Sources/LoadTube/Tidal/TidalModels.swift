@@ -110,6 +110,8 @@ enum TidalError: LocalizedError {
     case unavailable
     case regionLocked
     case planRequired
+    case playbackNotAllowed
+    case assetUnavailable
     case previewOnly
     case rateLimited(seconds: Int)
     case network(String)
@@ -130,6 +132,8 @@ enum TidalError: LocalizedError {
         case .unavailable: return "error.tidalUnavailable"
         case .regionLocked: return "error.tidalRegion"
         case .planRequired: return "error.tidalPlan"
+        case .playbackNotAllowed: return "error.tidalPlayback"
+        case .assetUnavailable: return "error.tidalAsset"
         case .previewOnly: return "error.tidalPreview"
         case .rateLimited: return "error.tidalRate"
         case .network: return "error.network"
@@ -416,6 +420,27 @@ struct TidalSessionInfo: Decodable {
     let partnerId: Int?
 }
 
+struct TidalSubscriptionResponse: Decodable {
+    let status: String?
+    let subscription: Plan?
+    let premiumAccess: Bool?
+    let highestSoundQuality: String?
+    let paymentOverdue: Bool?
+
+    struct Plan: Decodable {
+        let type: String?
+    }
+
+    var isFree: Bool {
+        if premiumAccess == false { return true }
+        return (subscription?.type ?? "").uppercased() == "FREE"
+    }
+
+    var planName: String {
+        subscription?.type ?? status ?? "TIDAL"
+    }
+}
+
 // MARK: - Резолв ссылки
 
 enum TidalResolved {
@@ -565,6 +590,7 @@ struct TidalSession: Codable {
     var refreshToken: String?
     var expiresAt: TimeInterval
     var credentialIndex: Int
+    var sessionId: String? = nil
 
     var isExpired: Bool {
         expiresAt > 0 && Date().timeIntervalSince1970 >= expiresAt - 60

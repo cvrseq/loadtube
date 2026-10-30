@@ -7,8 +7,12 @@ ICNS := build/AppIcon.icns
 DIST_DIR := dist
 DMG := $(DIST_DIR)/$(APP_NAME).dmg
 STAGE := build/dmg-stage
+RELEASE_DIR := release
+REPO := cvrseq/loadtube
+VERSION := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+TAG := v$(VERSION)
 
-.PHONY: all build icon app run install dmg clean
+.PHONY: all build icon app run install dmg release clean
 
 all: app
 
@@ -38,11 +42,18 @@ $(ICNS): $(ICON_PNG)
 
 app: build icon
 	rm -rf $(APP_DIR)
-	mkdir -p $(APP_DIR)/Contents/MacOS $(APP_DIR)/Contents/Resources
+	mkdir -p $(APP_DIR)/Contents/MacOS $(APP_DIR)/Contents/Resources $(APP_DIR)/Contents/Frameworks
 	cp $(BIN) $(APP_DIR)/Contents/MacOS/$(APP_NAME)
 	cp Resources/Info.plist $(APP_DIR)/Contents/Info.plist
 	cp $(ICNS) $(APP_DIR)/Contents/Resources/AppIcon.icns
-	codesign --force --deep --sign - $(APP_DIR) >/dev/null 2>&1 || true
+	@SPARKLE_FW=$$(find .build/artifacts -type d -path '*Sparkle.xcframework/macos*/Sparkle.framework' 2>/dev/null | head -1); \
+	if [ -z "$$SPARKLE_FW" ]; then \
+		echo "❌ Sparkle.framework не найден. Запустите: swift package resolve"; \
+		exit 1; \
+	fi; \
+	ditto "$$SPARKLE_FW" $(APP_DIR)/Contents/Frameworks/Sparkle.framework
+	codesign --force --deep --sign - $(APP_DIR)/Contents/Frameworks/Sparkle.framework
+	codesign --force --deep --sign - $(APP_DIR)
 	@echo "✅ Приложение собрано: $(APP_DIR)"
 
 run: app
@@ -66,5 +77,25 @@ dmg: app
 	hdiutil create -volname "$(APP_NAME)" -srcfolder $(STAGE) -ov -format UDZO $(DMG) >/dev/null
 	@echo "✅ DMG готов: $(DMG)"
 
+# Собирает appcast.xml для Sparkle. После этого:
+#   1) выложите release/$(APP_NAME)-$(VERSION).dmg в GitHub Release $(TAG)
+#   2) закоммитьте appcast.xml в ветку main
+release: dmg
+	@SPARKLE_BIN=$$(find .build/artifacts -type d -path '*Sparkle/bin' 2>/dev/null | head -1); \
+	if [ -z "$$SPARKLE_BIN" ]; then \
+		echo "❌ Инструменты Sparkle не найдены. Запустите: swift package resolve"; \
+		exit 1; \
+	fi; \
+	rm -rf $(RELEASE_DIR); \
+	mkdir -p $(RELEASE_DIR); \
+	cp $(DMG) "$(RELEASE_DIR)/$(APP_NAME)-$(VERSION).dmg"; \
+	"$$SPARKLE_BIN/generate_appcast" \
+		--download-url-prefix "https://github.com/$(REPO)/releases/download/$(TAG)/" \
+		--maximum-deltas 0 \
+		$(RELEASE_DIR); \
+	cp $(RELEASE_DIR)/appcast.xml appcast.xml
+	@echo "✅ appcast.xml обновлён для $(VERSION)"
+	@echo "   DMG для загрузки: $(RELEASE_DIR)/$(APP_NAME)-$(VERSION).dmg"
+
 clean:
-	rm -rf .build build dist
+	rm -rf .build build dist release

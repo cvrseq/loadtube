@@ -446,7 +446,10 @@ final class DownloadManager: ObservableObject {
         }
 
         if parent.completedCount == 0 && parent.failedCount > 0 {
-            parent.state = .failed(l10n.t("tidal.error.allTracks"))
+            let reason = parent.children
+                .compactMap(\.failedMessage)
+                .first
+            parent.state = .failed(reason ?? l10n.t("tidal.error.allTracks"))
             parent.detail = ""
             return
         }

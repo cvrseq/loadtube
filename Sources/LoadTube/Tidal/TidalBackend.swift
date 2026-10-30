@@ -7,6 +7,9 @@ import Foundation
 final class TidalBackend {
     let ffmpegPath: String
     private var albumCache: [Int: TidalAlbum] = [:]
+    private var subscription: TidalSubscriptionResponse?
+    private var subscriptionLoaded = false
+    private var subscriptionUserID: Int?
 
     init(ffmpegPath: String) {
         self.ffmpegPath = ffmpegPath
@@ -26,6 +29,7 @@ final class TidalBackend {
         task: DownloadTask
     ) async throws {
         guard track.idValue > 0 else { throw TidalError.unavailable }
+        if await isFreeAccount() { throw TidalError.playbackNotAllowed }
 
         let fullAlbum = await fullAlbum(album ?? track.album)
         let resolved = try await resolveTrackStream(trackID: track.idValue, task: task)
@@ -135,6 +139,7 @@ final class TidalBackend {
         task: DownloadTask
     ) async throws {
         guard video.idValue > 0 else { throw TidalError.unavailable }
+        if await isFreeAccount() { throw TidalError.playbackNotAllowed }
 
         let response = try await TidalAPI.shared.videoPlayback(videoID: video.idValue)
         guard let mime = response.manifestMimeType, let manifest = response.manifest else {
@@ -262,6 +267,10 @@ final class TidalBackend {
                 } catch let error as TidalError {
                     lastError = error
                     if case .sessionExpired = error { throw error }
+                    if case .playbackNotAllowed = error { throw error }
+                    if case .assetUnavailable = error { throw error }
+                    if case .regionLocked = error { throw error }
+                    if case .unavailable = error { throw error }
                     if case .rateLimited(let seconds) = error, !retriedRateLimit {
                         retriedRateLimit = true
                         task.detail = Localization.shared.f("tidal.detail.rate", seconds)
@@ -682,6 +691,22 @@ final class TidalBackend {
         let fm = FileManager.default
         try? fm.removeItem(at: destination)
         try fm.moveItem(at: source, to: destination)
+    }
+
+    /// Проверяем тариф один раз за сессию, чтобы Free-аккаунт получал
+    /// понятное сообщение, а не 401/4005.
+    private func isFreeAccount() async -> Bool {
+        let userID = TidalService.shared.account?.userId
+        if subscriptionLoaded, subscriptionUserID == userID {
+            return subscription?.isFree ?? false
+        }
+        if let value = try? await TidalAPI.shared.subscription() {
+            subscription = value
+            subscriptionUserID = userID
+            subscriptionLoaded = true
+            return value.isFree
+        }
+        return false
     }
 
     /// В playlist/mix API отдаёт альбом частично (id, title, cover).

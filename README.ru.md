@@ -57,7 +57,7 @@ LoadTube — небольшое приложение на SwiftUI, которо�
 | 🌗 | **Темы** | Тёмная, светлая или системная |
 | 🌍 | **Два языка** | Русский и английский, переключение на лету |
 | 📦 | **Без настройки** | При первом запуске приложение само скачивает портативные `yt-dlp` и `ffmpeg` (~120 МБ) — Homebrew не нужен |
-| 🔄 | **Мягкие обновления** | Раз в сутки проверяет GitHub Releases и предлагает новую версию; без согласия ничего не ставится |
+| 🔄 | **Мягкие обновления** | Раз в сутки Sparkle 2 проверяет обновления и предлагает новую версию; без согласия ничего не ставится |
 
 ## Поддерживаемые источники
 
@@ -107,6 +107,7 @@ make app       # собрать build/LoadTube.app (universal: arm64 + x86_64)
 make run       # собрать и запустить
 make install   # собрать и установить в /Applications
 make dmg       # собрать dist/LoadTube.dmg для распространения
+make release   # собрать DMG и обновить appcast.xml для Sparkle
 make clean     # удалить артефакты сборки
 ```
 
@@ -201,14 +202,23 @@ Playlist/01 - Artist - Track.flac
 
 ## Обновления
 
-LoadTube проверяет обновления через GitHub Releases:
+LoadTube обновляется через [Sparkle 2](https://sparkle-project.org) и appcast-фид в этом репозитории (`appcast.xml`); сами сборки лежат в GitHub Releases:
 
 - автоматически — не чаще одного раза в сутки, без блокировки интерфейса;
 - вручную — шестерёнка → **«Проверить обновления»**, или меню приложения **LoadTube → Проверить обновления…**.
 
-Если версия новее, появляется необязательное окно с описанием изменений. Можно нажать **«Позже»**, **«Пропустить эту версию»** или **«Скачать обновление»**. DMG скачивается в `~/Downloads`, проверяется через `hdiutil` и открывается; дальше вы сами перетаскиваете приложение в Applications.
+Если версия новее, Sparkle показывает окно с описанием изменений: **«Установить обновление»**, **«Напоминать позже»** или **«Пропустить эту версию»**. При установке архив скачивается, проверяется по EdDSA-подписи и заменяет приложение на месте, после чего предлагает перезапуск. Ничего не устанавливается без согласия пользователя; автопроверку можно отключить в настройках.
 
-Автопроверку можно отключить в настройках. Приложение не устанавливает обновления молча и не перезаписывает само себя.
+Релиз новой версии:
+
+```bash
+# 1. Поднимите CFBundleShortVersionString и CFBundleVersion в Resources/Info.plist
+make release   # соберёт release/LoadTube-<версия>.dmg и обновит appcast.xml
+# 2. Загрузите DMG в GitHub Release с тегом v<версия>
+# 3. Закоммитьте appcast.xml в ветку main
+```
+
+Подпись обновлений — EdDSA-ключ Sparkle (приватная часть хранится в Keychain, публичная прописана в `Resources/Info.plist` как `SUPublicEDKey`).
 
 ## Язык интерфейса
 
@@ -231,7 +241,8 @@ LoadTube проверяет обновления через GitHub Releases:
 ```text
 loadtube/
 ├── Package.swift                     # Swift Package (executable)
-├── Makefile                          # сборка .app/DMG, иконка, установка
+├── Makefile                          # сборка .app/DMG, иконка, установка, release
+├── appcast.xml                       # appcast-фид Sparkle 2
 ├── README.md                         # английский README (основной)
 ├── README.ru.md                      # русский README
 ├── Resources/
@@ -259,9 +270,7 @@ loadtube/
     ├── TidalSearchView.swift         # поиск по Tidal
     ├── TidalArtistSheet.swift        # выбор альбомов артиста
     ├── DownloadGroupRow.swift        # альбом/плейлист одной строкой
-    ├── UpdateManager.swift           # мягкие обновления GitHub Releases
-    ├── UpdateView.swift              # окно обновления
-    ├── UpdateFileDownloader.swift    # загрузка DMG с прогрессом
+    ├── UpdateManager.swift           # обновления через Sparkle 2
     ├── DependencyManager.swift       # поиск и установка yt-dlp + ffmpeg
     ├── ProcessRunner.swift           # запуск дочерних процессов
     ├── Notifier.swift                # уведомления и звук

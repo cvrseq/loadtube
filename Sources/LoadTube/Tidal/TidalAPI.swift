@@ -325,6 +325,12 @@ actor TidalAPI {
         )
     }
 
+    func subscription() async throws -> TidalSubscriptionResponse {
+        let session = try await TidalAuth.shared.validSession()
+        guard session.userId > 0 else { throw TidalError.sessionExpired }
+        return try await request("users/\(session.userId)/subscription")
+    }
+
     func lyrics(trackID: Int) async throws -> TidalLyrics {
         try await request(
             "tracks/\(trackID)/lyrics",
@@ -428,6 +434,9 @@ actor TidalAPI {
                 let country = tokenSession.countryCode.isEmpty ? fallback : tokenSession.countryCode
                 query.append(URLQueryItem(name: "countryCode", value: country))
             }
+            if let sessionId = tokenSession.sessionId, !sessionId.isEmpty {
+                query.append(URLQueryItem(name: "sessionId", value: sessionId))
+            }
             components.queryItems = query
 
             guard let url = components.url else { throw TidalError.server("Tidal URL") }
@@ -451,6 +460,12 @@ actor TidalAPI {
             }
 
             if http.statusCode == 401 {
+                // Tidal отдаёт 401 и при отсутствии подписки:
+                // subStatus 4005 / "Asset is not ready for playback".
+                // Это не истёкшая сессия — не разлогиниваем пользователя.
+                if let mapped = classifyUnauthorized(data) {
+                    throw mapped
+                }
                 if attempt < 2 {
                     continue
                 }
@@ -474,14 +489,43 @@ actor TidalAPI {
         }
     }
 
-    private func classifyForbidden(_ data: Data) -> TidalError {
+    private func classifyUnauthorized(_ data: Data) -> TidalError? {
         let message = (errorMessage(from: data) ?? "").lowercased()
+        let subStatus = errorSubStatus(from: data)
+
+        switch subStatus {
+        case 4005:
+            return .assetUnavailable
+        case 4007, 4032, 4035:
+            return .regionLocked
+        case 4033, 5003:
+            return .planRequired
+        default:
+            break
+        }
+
+        if message.contains("not ready for playback") || message.contains("asset is not ready") {
+            return .assetUnavailable
+        }
+        if message.contains("available in user's location")
+            || message.contains("not available in your country")
+            || message.contains("location") {
+            return .regionLocked
+        }
+        if message.contains("quality is not allowed") || message.contains("subscription") {
+            return .planRequired
+        }
         if message.contains("preview") || message.contains("fragment") {
             return .previewOnly
         }
-        if message.contains("subscription") || message.contains("plan") || message.contains("tier") {
-            return .planRequired
+        return nil
+    }
+
+    private func classifyForbidden(_ data: Data) -> TidalError {
+        if let mapped = classifyUnauthorized(data) {
+            return mapped
         }
+        let message = (errorMessage(from: data) ?? "").lowercased()
         if message.contains("country") || message.contains("region") || message.contains("territor") {
             return .regionLocked
         }
@@ -498,6 +542,15 @@ actor TidalAPI {
         if let message = object["message"] as? String, !message.isEmpty {
             return message
         }
+        return nil
+    }
+
+    private func errorSubStatus(from data: Data) -> Int? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let value = object["subStatus"] as? Int { return value }
+        if let value = object["sub_status"] as? Int { return value }
         return nil
     }
 }
